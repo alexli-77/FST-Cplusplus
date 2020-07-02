@@ -1,0 +1,1826 @@
+//
+//  fstlib.h
+//
+//  Copyright (c) 2018 Yuji Hirose. All rights reserved.
+//  MIT License
+//
+
+#ifndef INDEXLIB_FSTLIB_H_
+#define INDEXLIB_FSTLIB_H_
+
+#include <algorithm>
+#include <cassert>
+#include <cstring>
+#include <iostream>
+#include <list>
+#include <map>
+#include <memory>
+#include <numeric>
+#include <set>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+#include <indexlib/common.h>
+
+INDEXLIB_BEGIN_NS(fst);
+//-----------------------------------------------------------------------------
+// state machine
+//-----------------------------------------------------------------------------
+
+// MurmurHash64B - 64-bit MurmurHash2 for 32-bit platforms
+// URL:: https://github.com/aappleby/smhasher/blob/master/src/MurmurHash2.cpp
+// License: Public Domain
+
+inline uint64_t MurmurHash64B(const void *key, size_t len, uint64_t seed) {
+  const uint32_t m = 0x5bd1e995;
+  const size_t r = 24;
+
+  uint32_t h1 = uint32_t(seed) ^ len;
+  uint32_t h2 = uint32_t(seed >> 32);
+
+  const uint32_t *data = (const uint32_t *)key;
+
+  while (len >= 8) {
+    uint32_t k1 = *data++;
+    k1 *= m;
+    k1 ^= k1 >> r;
+    k1 *= m;
+    h1 *= m;
+    h1 ^= k1;
+    len -= 4;
+
+    uint32_t k2 = *data++;
+    k2 *= m;
+    k2 ^= k2 >> r;
+    k2 *= m;
+    h2 *= m;
+    h2 ^= k2;
+    len -= 4;
+  }
+
+  if (len >= 4) {
+    uint32_t k1 = *data++;
+    k1 *= m;
+    k1 ^= k1 >> r;
+    k1 *= m;
+    h1 *= m;
+    h1 ^= k1;
+    len -= 4;
+  }
+
+  switch (len) {
+  case 3: h2 ^= ((unsigned char *)data)[2] << 16;
+  case 2: h2 ^= ((unsigned char *)data)[1] << 8;
+  case 1: h2 ^= ((unsigned char *)data)[0]; h2 *= m;
+  };
+
+  h1 ^= h2 >> 18;
+  h1 *= m;
+  h2 ^= h1 >> 22;
+  h2 *= m;
+  h1 ^= h2 >> 17;
+  h1 *= m;
+  h2 ^= h1 >> 19;
+  h2 *= m;
+
+  uint64_t h = h1;
+
+  h = (h << 32) | h2;
+
+  return h;
+}
+
+inline size_t get_prefix_length(const std::string &s1, const std::string &s2) {
+  size_t i = 0;
+  while (i < s1.length() && i < s2.length() && s1[i] == s2[i]) {
+    i++;
+  }
+  return i;
+}
+
+template <typename output_t> struct OutputTraits {};
+
+template <> struct OutputTraits<uint32_t> {
+  typedef uint32_t value_type;
+
+  static value_type initial_value() { return 0; }
+
+  static bool empty(value_type val) { return val == 0; }
+
+  static std::string to_string(value_type val) { return std::to_string(val); }
+
+  static void prepend_value(value_type &base, value_type val) { base += val; }
+
+  static value_type get_suffix(value_type a, value_type b) { return a - b; }
+
+  static value_type get_common_previx(value_type a, value_type b) {
+    return std::min(a, b);
+  }
+
+  static void write_value(char *buff, size_t &buff_len, value_type val) {
+    memcpy(&buff[buff_len], &val, sizeof(val));
+    buff_len += sizeof(val);
+  }
+};
+
+template <> struct OutputTraits<size_t> {
+  typedef size_t value_type;
+
+  static value_type initial_value() { return 0; }
+
+  static bool empty(value_type val) { return val == 0; }
+
+  static std::string to_string(value_type val) { return std::to_string(val); }
+
+  static void prepend_value(value_type &base, value_type val) { base += val; }
+
+  static value_type get_suffix(value_type a, value_type b) { return a - b; }
+
+  static value_type get_common_previx(value_type a, value_type b) {
+    return std::min(a, b);
+  }
+
+  static void write_value(char *buff, size_t &buff_len, value_type val) {
+    memcpy(&buff[buff_len], &val, sizeof(val));
+    buff_len += sizeof(val);
+  }
+};
+
+template <> struct OutputTraits<std::string> {
+  typedef std::string value_type;
+
+  static value_type initial_value() { return value_type(); }
+
+  static bool empty(const value_type &val) { return val.empty(); }
+
+  static value_type to_string(const value_type &val) { return val; }
+
+  static void prepend_value(value_type &base, const value_type &val) {
+    base.insert(0, val);
+  }
+
+  static value_type get_suffix(const value_type &a, const value_type &b) {
+    return a.substr(b.size());
+  }
+
+  static value_type get_common_previx(const value_type &a,
+                                      const value_type &b) {
+    return a.substr(0, get_prefix_length(a, b));
+  }
+
+  static void write_value(char *buff, size_t &buff_len, const value_type &val) {
+    memcpy(&buff[buff_len], val.data(), val.size());
+    buff_len += val.size();
+  }
+};
+
+template <typename output_t> class State {
+public:
+  typedef State *pointer;
+
+  struct Transition {
+    pointer state;
+    output_t output;
+
+    bool operator==(const Transition &rhs) const {
+      if (this != &rhs) { return state == rhs.state && output == rhs.output; }
+      return true;
+    }
+  };
+
+  class Transitions {
+  public:
+    // TODO:
+    std::vector<char> arcs;
+    std::vector<Transition> states_and_outputs;
+    std::vector<std::string> text;
+
+    bool operator==(const Transitions &rhs) const {
+      if (this != &rhs) {
+        return arcs == rhs.arcs && states_and_outputs == rhs.states_and_outputs;
+      }
+      return true;
+    }
+
+    size_t size() const { return arcs.size(); }
+
+    int get_index(char arc) const {
+      for (size_t i = 0; i < arcs.size(); i++) {
+        if (arcs[i] == arc) { return i; }
+      }
+      return -1;
+    }
+
+    pointer next_state(const char *start, const char *end,
+                       size_t &read_bytes) const {
+      auto p = start;
+      auto arc = *p++;
+      auto idx = get_index(arc);
+      if (idx != -1) {
+        const auto &s = text[idx];
+        auto size = end - p;
+        if (s.empty() || (s.size() <= size && s == std::string(p, s.size()))) {
+          read_bytes = s.size() + 1;
+          return states_and_outputs[idx].state;
+        }
+      }
+      return nullptr;
+    }
+
+    const output_t &output(char arc) const {
+      auto idx = get_index(arc);
+      assert(idx != -1);
+      return states_and_outputs[idx].output;
+    }
+
+    template <typename Functor> void for_each(Functor fn) const {
+      for (auto i = 0u; i < arcs.size(); i++) {
+        fn(arcs[i], states_and_outputs[i], i);
+      }
+    }
+
+    template <typename Functor> void for_each_with_text(Functor fn) const {
+      for (auto i = 0u; i < arcs.size(); i++) {
+        fn(arcs[i], states_and_outputs[i], i, text[i]);
+      }
+    }
+
+    template <typename Functor> void for_each_reverse(Functor fn) const {
+      for (auto i = arcs.size(); i > 0; i--) {
+        auto idx = i - 1;
+        fn(arcs[idx], states_and_outputs[idx], idx);
+      }
+    }
+
+    template <typename Functor> void for_each_reverse_text(Functor fn) const {
+      for (auto i = arcs.size(); i > 0; i--) {
+        auto idx = i - 1;
+        fn(arcs[idx], states_and_outputs[idx], idx, text[idx]);
+      }
+    }
+
+    template <typename Functor> void for_each_arc(Functor fn) const {
+      for (auto arc : arcs) {
+        fn(arc);
+      }
+    }
+
+  private:
+    void clear() {
+      arcs.clear();
+      states_and_outputs.clear();
+      text.clear();
+    }
+
+    void set_transition(char arc, pointer state) {
+      auto idx = get_index(arc);
+      if (idx == -1) {
+        idx = arcs.size();
+        arcs.push_back(arc);
+        states_and_outputs.emplace_back(Transition());
+        text.push_back(std::string());
+      }
+      states_and_outputs[idx].state = state;
+    }
+
+    void set_output(char arc, const output_t &val) {
+      auto idx = get_index(arc);
+      states_and_outputs[idx].output = val;
+    }
+
+    void insert_output(char arc, const output_t &val) {
+      auto idx = get_index(arc);
+      auto &output = states_and_outputs[idx].output;
+      OutputTraits<output_t>::prepend_value(output, val);
+    }
+
+    friend class State;
+  };
+
+  size_t id;
+  bool in_dictionary;
+  bool final;
+  Transitions transitions;
+  std::vector<output_t> state_outputs;
+  size_t parent_count;
+
+  State(size_t id)
+      : id(id), in_dictionary(false), final(false), parent_count(0) {}
+
+  pointer next_state(const char *p, const char *end, size_t &read_bytes) const {
+    return transitions.next_state(p, end, read_bytes);
+  }
+
+  const output_t &output(char arc) const { return transitions.output(arc); }
+
+  bool operator==(const State &rhs) const {
+    if (this != &rhs) {
+      return final == rhs.final && transitions == rhs.transitions &&
+             state_outputs == rhs.state_outputs;
+    }
+    return true;
+  }
+
+  uint64_t hash() const;
+
+  void set_final(bool final) { this->final = final; }
+
+  void set_transition(char arc, pointer state) {
+    transitions.set_transition(arc, state);
+  }
+
+  void set_output(char arc, const output_t &output) {
+    transitions.set_output(arc, output);
+  }
+
+  void prepend_suffix_to_output(char arc, const output_t &suffix) {
+    transitions.insert_output(arc, suffix);
+  }
+
+  void push_to_state_outputs(const output_t &output) {
+    if (state_outputs.empty()) {
+      // NOTE: The following code makes good performance...
+      state_outputs.push_back(0);
+    }
+    state_outputs.push_back(output);
+  }
+
+  void prepend_suffix_to_state_outputs(const output_t &suffix) {
+    if (state_outputs.empty()) {
+      // NOTE: The following code makes good performance...
+      state_outputs.push_back(suffix);
+    } else {
+      for (auto &state_output : state_outputs) {
+        OutputTraits<output_t>::prepend_value(state_output, suffix);
+      }
+    }
+  }
+
+  void reuse(size_t state_id) {
+    id = state_id;
+    set_final(false);
+    transitions.clear();
+    state_outputs.clear();
+  }
+
+  static pointer New(std::vector<pointer> &objects, size_t state_id = -1) {
+    auto p = new State(state_id);
+    objects.push_back(p);
+    return p;
+  }
+
+private:
+  State(const State &) = delete;
+  State(State &&) = delete;
+};
+
+template <typename output_t> inline uint64_t State<output_t>::hash() const {
+  char buff[2048]; // TOOD: large enough?
+  size_t buff_len = 0;
+
+  if (final) {
+    for (const auto &state_output : state_outputs) {
+      OutputTraits<output_t>::write_value(buff, buff_len, state_output);
+      buff[buff_len++] = '\t';
+    }
+  }
+
+  buff[buff_len++] = '\n';
+
+  transitions.for_each([&](char arc, const State::Transition &t, size_t i) {
+    buff[buff_len++] = arc;
+    uint32_t val = t.state->id;
+    memcpy(&buff[buff_len], &val, sizeof(val));
+    buff_len += sizeof(val);
+    OutputTraits<output_t>::write_value(buff, buff_len, t.output);
+    buff[buff_len++] = '\t';
+  });
+
+  return MurmurHash64B(buff, buff_len, 0);
+}
+
+template <typename output_t> class StateMachine {
+public:
+  size_t last_id;
+  size_t count;
+  typename State<output_t>::pointer root;
+
+  StateMachine(std::vector<typename State<output_t>::pointer> &&objects,
+               size_t id, typename State<output_t>::pointer root)
+      : last_id(id), count(id), root(root),objects_(objects) {}
+  ~StateMachine() {
+    for (auto p : objects_) {
+      delete p;
+    }
+    objects_.clear();
+  }
+
+private:
+  StateMachine(const StateMachine &) = delete;
+  StateMachine(StateMachine &&) = delete;
+  std::vector<typename State<output_t>::pointer> objects_;
+};
+
+// NOTE: unordered_set is not used here, because it uses size_t as hash value
+// which becomes 32-bit on 32-bit platforms. But we want to use 64-bit hash
+// value.
+template <typename output_t>
+using Dictionary =
+    std::unordered_map<uint64_t, typename State<output_t>::pointer>;
+
+template <typename output_t>
+inline typename State<output_t>::pointer
+find_minimized(typename State<output_t>::pointer state,
+               Dictionary<output_t> &dictionary, size_t &state_id,
+               bool &found) {
+  auto h = state->hash();
+
+  auto it = dictionary.find(h);
+  if (it != dictionary.end()) {
+    if (*it->second == *state) {
+      state_id--;
+      found = true;
+      return it->second;
+    }
+  }
+
+  // NOTE: COPY_STATE is very expensive...
+  state->in_dictionary = true;
+  dictionary[h] = state;
+  found = false;
+  return state;
+};
+
+template <typename output_t>
+inline void get_common_prefix_and_word_suffix(const output_t &current_output,
+                                              const output_t &output,
+                                              output_t &common_prefix,
+                                              output_t &word_suffix) {
+  common_prefix =
+      OutputTraits<output_t>::get_common_previx(output, current_output);
+  word_suffix = OutputTraits<output_t>::get_suffix(output, common_prefix);
+}
+
+template <typename output_t, typename Input>
+inline std::shared_ptr<StateMachine<output_t>> make_state_machine(Input input) {
+  Dictionary<output_t> dictionary;
+  std::vector<typename State<output_t>::pointer> objects;
+  size_t state_id = 0;
+
+  // Main algorithm ported from the technical paper
+  std::vector<typename State<output_t>::pointer> temp_states;
+  std::string previous_word;
+  temp_states.push_back(State<output_t>::New(objects, state_id++));
+
+  input([&](const std::string &current_word, output_t current_output) {
+    // The following loop caluculates the length of the longest common
+    // prefix of 'current_word' and 'previous_word'
+    auto prefix_length = get_prefix_length(previous_word, current_word);
+
+    // We minimize the states from the suffix of the previous word
+    typename State<output_t>::pointer prev_state = nullptr;
+    for (auto i = previous_word.length(); i > prefix_length; i--) {
+      auto arc = previous_word[i - 1];
+
+      bool found;
+      auto state =
+          find_minimized<output_t>(temp_states[i], dictionary, state_id, found);
+
+      if (found) {
+        if (prev_state) { prev_state->parent_count--; }
+      } else {
+        // Ownership of the object in temp_states[i] has been moved to the
+        // dictionary...
+        temp_states[i] = State<output_t>::New(objects);
+      }
+      state->parent_count++;
+      temp_states[i - 1]->set_transition(arc, state);
+      prev_state = state;
+    }
+
+    // This loop initializes the tail states for the current word
+    for (auto i = prefix_length + 1; i <= current_word.length(); i++) {
+      assert(i <= temp_states.size());
+      if (i == temp_states.size()) {
+        temp_states.push_back(State<output_t>::New(objects, state_id++));
+      } else {
+        temp_states[i]->reuse(state_id++);
+      }
+      auto arc = current_word[i - 1];
+      temp_states[i - 1]->set_transition(arc, temp_states[i]);
+    }
+
+    if (current_word != previous_word) {
+      auto state = temp_states[current_word.length()];
+      state->set_final(true);
+      // NOTE: The following code causes bad performance...
+      // state->push_to_state_outputs("");
+    }
+
+    for (auto j = 1u; j <= prefix_length; j++) {
+      auto prev_state = temp_states[j - 1];
+      auto arc = current_word[j - 1];
+
+      const auto &output = prev_state->output(arc);
+
+      auto common_prefix = OutputTraits<output_t>::initial_value();
+      auto word_suffix = OutputTraits<output_t>::initial_value();
+      get_common_prefix_and_word_suffix(current_output, output, common_prefix,
+                                        word_suffix);
+
+      prev_state->set_output(arc, common_prefix);
+
+      if (!OutputTraits<output_t>::empty(word_suffix)) {
+        auto state = temp_states[j];
+        state->transitions.for_each_arc([&](char arc) {
+          state->prepend_suffix_to_output(arc, word_suffix);
+        });
+        if (state->final) {
+          state->prepend_suffix_to_state_outputs(word_suffix);
+        }
+      }
+
+      current_output =
+          OutputTraits<output_t>::get_suffix(current_output, common_prefix);
+    }
+
+    if (current_word == previous_word) {
+      auto state = temp_states[current_word.length()];
+      state->push_to_state_outputs(current_output);
+    } else {
+      auto state = temp_states[prefix_length];
+      auto arc = current_word[prefix_length];
+      state->set_output(arc, current_output);
+    }
+
+    previous_word = current_word;
+  });
+
+  // Here we are minimizing the states of the last word
+  typename State<output_t>::pointer prev_state = nullptr;
+  for (auto i = previous_word.length(); i > 0; i--) {
+    auto arc = previous_word[i - 1];
+
+    bool found;
+    auto state =
+        find_minimized<output_t>(temp_states[i], dictionary, state_id, found);
+
+    if (found) {
+      if (prev_state) { prev_state->parent_count--; }
+    }
+
+    state->parent_count++;
+    temp_states[i - 1]->set_transition(arc, state);
+    prev_state = state;
+  }
+
+  bool found;
+  auto root =
+      find_minimized<output_t>(temp_states[0], dictionary, state_id, found);
+  return std::make_shared<StateMachine<output_t>>(std::move(objects), state_id,
+                                                  root);
+}
+
+template <typename output_t>
+inline std::shared_ptr<StateMachine<output_t>>
+make_state_machine(const std::vector<std::pair<std::string, output_t>> &input) {
+  return make_state_machine<output_t>([&](const auto &add_entry) {
+    for (const auto &item : input) {
+      add_entry(item.first, item.second);
+    }
+  });
+}
+
+template <class output_t>
+inline bool connectable(typename State<output_t>::pointer state) {
+  if (state->final) { return false; }
+
+  if (state->transitions.size() > 1) { return false; }
+
+  if (state->parent_count > 1) { return false; }
+
+  return true;
+}
+
+template <class output_t>
+inline void optimize_core(StateMachine<output_t> &sm,
+                          typename State<output_t>::pointer state,
+                          std::set<size_t> &check) {
+  auto id = state->id;
+
+  if (check.find(id) != check.end()) { return; }
+  check.insert(id);
+
+  for (auto i = 0u; i < state->transitions.arcs.size(); i++) {
+    auto &t = state->transitions.states_and_outputs[i];
+    while (connectable<output_t>(t.state)) {
+      state->transitions.text[i] += t.state->transitions.arcs[0];
+      t.state = t.state->transitions.states_and_outputs[0].state;
+      sm.count--;
+    }
+
+    optimize_core<output_t>(sm, t.state, check);
+  }
+}
+
+template <typename output_t> inline void optimize(StateMachine<output_t> &sm) {
+  std::set<size_t> check;
+  optimize_core<output_t>(sm, sm.root, check);
+}
+
+//-----------------------------------------------------------------------------
+// virtual machine
+//-----------------------------------------------------------------------------
+
+const size_t DEFAULT_MIN_ARCS_FOR_JUMP_TABLE = 6;
+
+template <typename Val> inline size_t vb_encode_value_length(Val n) {
+  size_t len = 0;
+  while (n >= 128) {
+    len++;
+    n >>= 7;
+  }
+  len++;
+  return len;
+}
+
+template <typename Val> inline size_t vb_encode_value(Val n, char *out) {
+  size_t len = 0;
+  while (n >= 128) {
+    out[len] = (char)(n & 0x7f);
+    len++;
+    n >>= 7;
+  }
+  out[len] = (char)(n + 128);
+  len++;
+  return len;
+}
+
+template <typename Val>
+inline size_t vb_decode_value(const char *data, Val &n) {
+  auto p = (const uint8_t *)data;
+  size_t len = 0;
+  n = 0;
+  size_t cnt = 0;
+  while (p[len] < 128) {
+    n += (p[len++] << (7 * cnt++));
+  }
+  n += (p[len++] - 128) << (7 * cnt);
+  return len;
+}
+
+union Ope {
+  enum OpeType { ArcNotFinal = 0, ArcFinal, ArcFinalWithStateOutput, Jmp };
+
+  enum JumpOffsetType { JumpOffsetNone = 0, JumpOffsetZero, JumpOffsetCurrent };
+
+  enum OutputLengthType {
+    OutputLengthNone = 0,
+    OutputLengthOne,
+    OutputLengthTwo,
+    OutputLength
+  };
+
+  struct {
+    unsigned type : 2;
+    unsigned has_text : 1;
+    unsigned last_transition : 1;
+    unsigned output_length_type : 2;
+    unsigned jump_offset_type : 2;
+  } arc;
+
+  struct {
+    unsigned type : 2;
+    unsigned need_2byte : 1;
+    unsigned reserve : 5;
+  } jmp;
+
+  uint8_t byte;
+};
+
+inline bool is_ope_arc(Ope ope) { return ope.jmp.type != Ope::Jmp; }
+
+inline bool is_ope_jmp(Ope ope) { return ope.jmp.type == Ope::Jmp; }
+
+inline bool is_ope_final(Ope ope) {
+  assert(ope.arc.type != Ope::Jmp);
+  return ope.arc.type != Ope::ArcNotFinal;
+}
+
+inline bool has_ope_state_outputs(Ope ope) {
+  return ope.arc.type == Ope::ArcFinalWithStateOutput;
+}
+
+template <typename output_t> struct Command {
+  // General
+  size_t id = -1;
+  size_t next_id = -1;
+
+  bool is_arc;
+
+  // Arc
+  bool final;
+  bool last_transition;
+  char arc;
+  std::string text;
+  Ope::OutputLengthType output_length_type;
+  output_t output;
+  std::vector<output_t> state_outputs;
+  Ope::JumpOffsetType jump_offset_type;
+  size_t jump_offset;
+  bool use_jump_table;
+
+  // Jmp
+  std::vector<int16_t> arc_jump_offsets;
+
+  size_t output_length(uint32_t output) const {
+    if (output > 0xffff) {
+      return sizeof(output_t);
+    } else if (output > 0xff) {
+      return sizeof(uint16_t);
+    } else if (output > 0) {
+      return sizeof(uint8_t);
+    }
+    return 0;
+  }
+
+  size_t output_length(size_t output) const {
+      //if (output > 0xffffffff) {
+      if (output > 0xffff) {
+          return sizeof(output_t);
+          //} else if (output > 0xffff) {
+          //return sizeof(uint32_t);
+      } else if (output > 0xff) {
+          return sizeof(uint16_t);
+      } else if (output > 0) {
+          return sizeof(uint8_t);
+      }
+      
+      return 0;
+  }
+
+  size_t output_length(const std::string &output) const {
+    size_t size = 0;
+    if (output.length() > 2) { size += sizeof(uint8_t); }
+    size += output.length();
+    return size;
+  }
+
+  size_t state_output_length(uint32_t state_output) const {
+    return sizeof(state_output);
+  }
+
+  size_t state_output_length(size_t state_output) const {
+    return sizeof(state_output);
+  }
+
+  size_t state_output_length(const std::string &state_output) const {
+    return sizeof(uint8_t) + state_output.length();
+  }
+
+  size_t byte_code_size() const {
+    // ope
+    auto size = sizeof(uint8_t);
+
+    if (is_arc) {
+      // arc
+      if (!use_jump_table) { size += sizeof(uint8_t); }
+
+      // text
+      if (!text.empty()) {
+        size += sizeof(uint8_t);
+        size += text.size();
+      }
+
+      // output
+      size += output_length(output);
+
+      // state_outputs
+      if (has_state_outputs()) {
+        size += sizeof(uint8_t);
+        for (const auto &state_output : state_outputs) {
+          size += state_output_length(state_output);
+        }
+      }
+
+      // jump_offset
+      if (jump_offset_type == Ope::JumpOffsetCurrent) {
+        size += vb_encode_value_length(jump_offset);
+      }
+    } else { // type == Jmp
+      // arc_jump_offsets
+      bool need_2byte;
+      size_t start;
+      size_t end;
+      scan_arc_jump_offsets(need_2byte, start, end);
+
+      if (need_2byte) {
+        size += 2 + sizeof(int16_t) * (end - start);
+      } else {
+        size += 2 + sizeof(uint8_t) * (end - start);
+      }
+    }
+
+    return size;
+  }
+
+  void write_output(std::vector<char> &byte_code, uint32_t output) const {
+      if (output > 0xffff) {
+          byte_code.insert(byte_code.end(), reinterpret_cast<const char *>(&output),
+                  reinterpret_cast<const char *>(&output) +
+                  sizeof(output));
+      } else if (output > 0xff) {
+          uint16_t val = output;
+          byte_code.insert(byte_code.end(), reinterpret_cast<const char *>(&val),
+                  reinterpret_cast<const char *>(&val) + sizeof(val));
+      } else if (output > 0) {
+          uint8_t val = output;
+          byte_code.insert(byte_code.end(), reinterpret_cast<const char *>(&val),
+                  reinterpret_cast<const char *>(&val) + sizeof(val));
+      }
+  }
+
+  void write_output(std::vector<char> &byte_code, size_t output) const {
+      //if (output > 0xffffffff) {
+      if (output > 0xffff) {
+          byte_code.insert(byte_code.end(), reinterpret_cast<const char *>(&output),
+                  reinterpret_cast<const char *>(&output) +
+                  sizeof(output));
+      //} else if (output > 0xffff) {
+      //    uint32_t val = output;
+      //    byte_code.insert(byte_code.end(), reinterpret_cast<const char *>(&output),
+      //            reinterpret_cast<const char *>(&output) +
+      //            sizeof(val));
+      } else if (output > 0xff) {
+          uint16_t val = output;
+          byte_code.insert(byte_code.end(), reinterpret_cast<const char *>(&val),
+                  reinterpret_cast<const char *>(&val) + sizeof(val));
+      } else if (output > 0) {
+          uint8_t val = output;
+          byte_code.insert(byte_code.end(), reinterpret_cast<const char *>(&val),
+                  reinterpret_cast<const char *>(&val) + sizeof(val));
+      }
+  }
+
+  void write_output(std::vector<char> &byte_code,
+                    const std::string &output) const {
+    if (output.length() > 2) { byte_code.push_back((char)output.length()); }
+    byte_code.insert(byte_code.end(), output.begin(), output.end());
+  }
+
+  void write_state_output(std::vector<char> &byte_code,
+                          uint32_t state_output) const {
+    byte_code.insert(
+        byte_code.end(), reinterpret_cast<const char *>(&state_output),
+        reinterpret_cast<const char *>(&state_output) + sizeof(state_output));
+  }
+
+  void write_state_output(std::vector<char> &byte_code,
+                          size_t state_output) const {
+    byte_code.insert(
+        byte_code.end(), reinterpret_cast<const char *>(&state_output),
+        reinterpret_cast<const char *>(&state_output) + sizeof(state_output));
+  }
+
+  void write_state_output(std::vector<char> &byte_code,
+                          const std::string &state_output) const {
+    byte_code.push_back((char)state_output.length());
+    byte_code.insert(byte_code.end(), state_output.begin(), state_output.end());
+  }
+
+  void write_byte_code(std::vector<char> &byte_code) const {
+    auto save_size = byte_code.size();
+
+    if (is_arc) {
+      // ope
+      assert(final || (!final && !has_state_outputs()));
+      auto t = Ope::ArcNotFinal;
+      if (final) {
+        if (has_state_outputs()) {
+          t = Ope::ArcFinalWithStateOutput;
+        } else {
+          t = Ope::ArcFinal;
+        }
+      }
+      Ope ope = {t, !text.empty(), last_transition,
+                 (unsigned int)output_length_type,
+                 (unsigned int)jump_offset_type};
+      byte_code.push_back(ope.byte);
+
+      // arc
+      if (!use_jump_table) { byte_code.push_back(arc); }
+
+      // text
+      if (!text.empty()) {
+        byte_code.push_back((char)text.size());
+        byte_code.insert(byte_code.end(), text.begin(), text.end());
+      }
+
+      // output
+      write_output(byte_code, output);
+
+      // state_outputs
+      if (has_state_outputs()) {
+        byte_code.push_back((char)state_outputs.size());
+        for (const auto &state_output : state_outputs) {
+          write_state_output(byte_code, state_output);
+        }
+      }
+
+      // jump_offset
+      if (jump_offset_type == Ope::JumpOffsetCurrent) {
+        char vb[9]; // To hold 64 bits value
+        auto vb_len = vb_encode_value(jump_offset, vb);
+        byte_code.insert(byte_code.end(), vb, vb + vb_len);
+      }
+    } else { // type == Jmp
+      bool need_2byte;
+      size_t start;
+      size_t end;
+      scan_arc_jump_offsets(need_2byte, start, end);
+
+      // ope
+      Ope ope = {Ope::Jmp, need_2byte, 0};
+      byte_code.push_back(ope.byte);
+
+      // arc_jump_offsets
+      auto count = end - start;
+      byte_code.push_back((unsigned char)start);
+      byte_code.push_back(
+          (unsigned char)(count - 1)); // count is stored from 0 to 255
+      if (need_2byte) {
+        auto p =
+            (const char *)arc_jump_offsets.data() + (sizeof(int16_t) * start);
+        auto table_size = sizeof(int16_t) * count;
+        byte_code.insert(byte_code.end(), p, p + table_size);
+      } else {
+        for (auto i = start; i < end; i++) {
+          auto offset = arc_jump_offsets[i];
+          byte_code.push_back((unsigned char)offset);
+        }
+      }
+    }
+
+    assert(byte_code.size() - save_size == byte_code_size());
+  }
+
+private:
+  bool has_state_outputs() const { return !state_outputs.empty(); }
+
+  void scan_arc_jump_offsets(bool &need_2byte, size_t &start,
+                             size_t &end) const {
+    need_2byte = false;
+    start = -1;
+    end = -1;
+    for (auto i = 0; i < 256; i++) {
+      auto offset = arc_jump_offsets[i];
+      if (offset != -1) {
+        if (offset >= 0xff) { need_2byte = true; }
+        //if (start == -1) { start = i; }
+        if ((size_t)-1 == start) { start = i; }
+        end = i + 1;
+      }
+    }
+  }
+};
+
+template <class output_t> using Commands = std::vector<Command<output_t>>;
+
+template <class output_t>
+inline size_t compile_core(typename State<output_t>::pointer state,
+                           Commands<output_t> &commands,
+                           std::vector<size_t> &state_positions,
+                           size_t position, size_t min_arcs_for_jump_table) {
+  assert(state->transitions.arcs.size() > 0);
+
+  if (state_positions[state->id]) { return position; }
+
+  struct Helper {
+      static size_t output_length(uint32_t output) {
+          auto output_len = 0;
+          if (output > 0xffff) {
+              output_len = sizeof(output_t);
+          } else if (output > 0xff) {
+              output_len = sizeof(uint16_t);
+          } else if (output > 0) {
+              output_len = sizeof(uint8_t);
+          }
+          return output_len;
+      }
+
+      static size_t output_length(size_t output) {
+          //if (output > 0xffffffff) {
+          if (output > 0xffff) {
+              return sizeof(output_t);
+          //} else if (output > 0xffff) {
+          //   return sizeof(uint32_t);
+          } else if (output > 0xff) {
+              return sizeof(uint16_t);
+          } else if (output > 0) {
+              return sizeof(uint8_t);
+          }
+          return 0;
+      }
+
+      static size_t output_length(const std::string &output) {
+          return output.length();
+      }
+  };
+
+  auto arcs_count = state->transitions.arcs.size();
+
+  state->transitions.for_each_reverse(
+      [&](char arc, const typename State<output_t>::Transition &t, size_t i) {
+        auto next_state = t.state;
+        if (next_state->transitions.arcs.size() > 0) {
+          position = compile_core(next_state, commands, state_positions,
+                                  position, min_arcs_for_jump_table);
+        }
+      });
+
+  auto use_jump_table = (arcs_count >= min_arcs_for_jump_table);
+
+  size_t arc_positions[256];
+  memset(arc_positions, -1, sizeof(arc_positions));
+
+  state->transitions.for_each_reverse_text(
+      [&](char arc, const typename State<output_t>::Transition &t, size_t i,
+          const std::string &text) {
+        auto next_state = t.state;
+
+        Command<output_t> cmd;
+        cmd.is_arc = true;
+        cmd.id = state->id;
+        cmd.next_id = next_state->id;
+        cmd.final = next_state->final;
+        cmd.last_transition = (i + 1 == arcs_count);
+        cmd.arc = arc;
+        cmd.text = text;
+        cmd.output = t.output;
+
+        auto output_len = Helper::output_length(t.output);
+        if (output_len == 0) {
+          cmd.output_length_type = Ope::OutputLengthNone;
+        } else if (output_len == 1) {
+          cmd.output_length_type = Ope::OutputLengthOne;
+        } else if (output_len == 2) {
+          cmd.output_length_type = Ope::OutputLengthTwo;
+        } else {
+          cmd.output_length_type = Ope::OutputLength;
+        }
+
+        cmd.state_outputs = next_state->state_outputs;
+
+        if (next_state->transitions.arcs.size() == 0) {
+          cmd.jump_offset_type = Ope::JumpOffsetNone;
+          cmd.jump_offset = 0;
+        } else {
+          auto offset = position - state_positions[next_state->id];
+          if (offset == 0) {
+            cmd.jump_offset_type = Ope::JumpOffsetZero;
+          } else {
+            cmd.jump_offset_type = Ope::JumpOffsetCurrent;
+          }
+          cmd.jump_offset = offset;
+        }
+
+        cmd.use_jump_table = use_jump_table;
+
+        position += cmd.byte_code_size();
+        commands.emplace_back(std::move(cmd));
+        arc_positions[(uint8_t)arc] = position;
+      });
+
+  if (use_jump_table) {
+    Command<output_t> cmd;
+    cmd.is_arc = false;
+    cmd.id = state->id;
+    cmd.next_id = -1;
+    cmd.arc_jump_offsets.assign(256, -1);
+    for (auto i = 0; i < 256; i++) {
+      //if (arc_positions[i] != -1) {
+      if ((size_t)-1 != arc_positions[i]) {
+        auto offset = position - arc_positions[i];
+        cmd.arc_jump_offsets[i] = (int16_t)offset;
+      }
+    }
+
+    position += cmd.byte_code_size();
+    commands.emplace_back(std::move(cmd));
+  }
+
+  state_positions[state->id] = position;
+  return position;
+}
+
+template <typename output_t>
+inline std::vector<char>
+compile(const StateMachine<output_t> &sm,
+        size_t min_arcs_for_jump_table = DEFAULT_MIN_ARCS_FOR_JUMP_TABLE) {
+  std::vector<char> byte_code;
+
+  Commands<output_t> commands;
+  std::vector<size_t> state_positions(sm.last_id);
+  compile_core(sm.root, commands, state_positions, 0, min_arcs_for_jump_table);
+
+  auto rit = commands.rbegin();
+  while (rit != commands.rend()) {
+    rit->write_byte_code(byte_code);
+    ++rit;
+  }
+
+  return byte_code;
+}
+
+template <typename output_t, typename Input>
+inline std::vector<char>
+build(Input input,
+      size_t min_arcs_for_jump_table = DEFAULT_MIN_ARCS_FOR_JUMP_TABLE) {
+  auto sm = make_state_machine<output_t>(input);
+  optimize(*sm);
+  return compile(*sm, min_arcs_for_jump_table);
+}
+
+template <typename Input>
+inline std::vector<char>
+build(Input input,
+      size_t min_arcs_for_jump_table = DEFAULT_MIN_ARCS_FOR_JUMP_TABLE) {
+  return build<size_t>(
+      [&](const auto &add_entry) {
+        size_t i = 0;
+        input([&](const std::string &item) { add_entry(item, i++); });
+      },
+      min_arcs_for_jump_table);
+}
+
+template <typename output_t>
+inline std::vector<char>
+build(const std::vector<std::pair<std::string, output_t>> &input,
+      size_t min_arcs_for_jump_table = DEFAULT_MIN_ARCS_FOR_JUMP_TABLE) {
+  return build<output_t>(
+      [&](const auto &add_entry) {
+        for (const auto &item : input) {
+          add_entry(item.first, item.second);
+        }
+      },
+      min_arcs_for_jump_table);
+}
+
+inline std::vector<char>
+build(const std::vector<std::string> &input,
+      size_t min_arcs_for_jump_table = DEFAULT_MIN_ARCS_FOR_JUMP_TABLE) {
+  return build<size_t>(
+      [&](const auto &add_entry) {
+        size_t i = 0;
+        for (const auto &item : input) {
+          add_entry(item, i++);
+        }
+      },
+      min_arcs_for_jump_table);
+}
+
+template <typename output_t> struct Helper_read_byte_code_arc {};
+
+template <> struct Helper_read_byte_code_arc<size_t> {
+  static const char *read_output_length(const char *p, size_t &output_len) {
+    output_len = sizeof(size_t);
+    return p;
+  }
+
+  static const char *skip_state_outputs(const char *p,
+                                        size_t state_outputs_size) {
+    if (state_outputs_size == 1) {
+      p += sizeof(size_t);
+    } else {
+      for (auto i = 0u; i < state_outputs_size; i++) {
+        p += sizeof(size_t);
+      }
+    }
+    return p;
+  }
+};
+
+template <> struct Helper_read_byte_code_arc<uint32_t> {
+  static const char *read_output_length(const char *p, size_t &output_len) {
+    output_len = sizeof(uint32_t);
+    return p;
+  }
+
+  static const char *skip_state_outputs(const char *p,
+                                        size_t state_outputs_size) {
+    if (state_outputs_size == 1) {
+      p += sizeof(uint32_t);
+    } else {
+      for (auto i = 0u; i < state_outputs_size; i++) {
+        p += sizeof(uint32_t);
+      }
+    }
+    return p;
+  }
+};
+
+template <> struct Helper_read_byte_code_arc<std::string> {
+  static const char *read_output_length(const char *p, size_t &output_len) {
+    output_len = (uint8_t)*p;
+    return ++p;
+  }
+
+  static const char *skip_state_outputs(const char *p,
+                                        size_t state_outputs_size) {
+    if (state_outputs_size == 1) {
+      p += sizeof(uint8_t) + (uint8_t)*p;
+    } else {
+      for (auto i = 0u; i < state_outputs_size; i++) {
+        p += sizeof(uint8_t) + (uint8_t)*p;
+      }
+    }
+    return p;
+  }
+};
+
+template <typename output_t>
+inline const char *
+read_byte_code_arc(Ope ope, const char *p, const char *end, size_t &text_len,
+                   const char *&text, size_t &output_len, const char *&output,
+                   size_t &state_outputs_size, const char *&state_output,
+                   Ope::JumpOffsetType &jump_offset_type, size_t &jump_offset) {
+  // state_outputs
+  text_len = 0;
+  // if (!(is_ope_final(ope)) && has_ope_state_outputs(ope)) {
+  if (ope.arc.has_text) {
+    text_len = (uint8_t)*p++;
+    text = p;
+    p += text_len;
+  }
+
+  // output
+  auto output_length_type = (Ope::OutputLengthType)ope.arc.output_length_type;
+  if (output_length_type == Ope::OutputLengthNone) {
+    output_len = 0;
+  } else if (output_length_type == Ope::OutputLengthOne) {
+    output_len = 1;
+    output = p;
+  } else if (output_length_type == Ope::OutputLengthTwo) {
+    output_len = 2;
+    output = p;
+  } else { // Ope::OutputLength
+    p = Helper_read_byte_code_arc<output_t>::read_output_length(p, output_len);
+    output = p;
+  }
+  p += output_len;
+
+  // state_outputs
+  if (is_ope_final(ope) && has_ope_state_outputs(ope)) {
+    state_outputs_size = (uint8_t)*p++;
+    state_output = p;
+    p = Helper_read_byte_code_arc<output_t>::skip_state_outputs(
+        p, state_outputs_size);
+  } else {
+    state_outputs_size = 0;
+  }
+
+  // jump_offset
+  jump_offset = 0;
+  jump_offset_type = (Ope::JumpOffsetType)ope.arc.jump_offset_type;
+  if (jump_offset_type == Ope::JumpOffsetCurrent) {
+    p += vb_decode_value(p, jump_offset);
+  }
+
+  return p;
+}
+
+inline const char *read_byte_code_jmp(Ope ope, uint8_t arc, const char *p,
+                                      const char *end, int32_t &jump_offset) {
+  auto start = (uint8_t)*p++;
+  auto count = ((uint8_t)*p++) + 1; // count is stored from 0 to 255
+
+  if (ope.jmp.need_2byte) {
+    if (start <= arc && arc < start + count) {
+      jump_offset = *(((const int16_t *)p) + (arc - start));
+    } else {
+      jump_offset = -1;
+    }
+    p += sizeof(int16_t) * count;
+  } else {
+    if (start <= arc && arc < start + count) {
+      jump_offset = *(((const uint8_t *)p) + (arc - start));
+      if (jump_offset == (uint8_t)-1) { jump_offset = -1; }
+    } else {
+      jump_offset = -1;
+    }
+    p += count;
+  }
+
+  return p;
+}
+
+inline const char *skip_byte_code_jmp(Ope ope, const char *p, const char *end,
+                                      std::list<uint8_t> &arcs) {
+  auto start = (uint8_t)*p++;
+  auto count = ((uint8_t)*p++) + 1; // count is stored from 0 to 255
+
+  for (auto i = 0; i < count; i++) {
+    int32_t jump_offset = -1;
+    if (ope.jmp.need_2byte) {
+      jump_offset = *(((const int16_t *)p) + i);
+    } else {
+      jump_offset = *(((const uint8_t *)p) + i);
+      if (jump_offset == (uint8_t)-1) { jump_offset = -1; }
+    }
+    if (jump_offset != -1) { arcs.push_back(start + i); }
+  }
+
+  if (ope.jmp.need_2byte) {
+    p += sizeof(int16_t) * count;
+  } else {
+    p += count;
+  }
+
+  return p;
+}
+
+template <typename output_t> struct Helper_run {};
+
+template <> struct Helper_run<size_t> {
+  static void read_output(size_t &buff, const char *output,
+                          size_t output_len) {
+    if (output_len == 0) {
+      ;
+    } else if (output_len == 1) {
+      auto val = *reinterpret_cast<const uint8_t *>(output);
+      buff += val;
+    } else if (output_len == 2) {
+      auto val = *reinterpret_cast<const uint16_t *>(output);
+      buff += val;
+    //} else if (output_len == sizeof(uint32_t)) {
+    //  auto val = *reinterpret_cast<const uint32_t *>(output);
+    //  buff += val;
+    } else {
+      assert(output_len == sizeof(size_t));
+      auto val = *reinterpret_cast<const size_t *>(output);
+      buff += val;
+    }
+  }
+
+  static const char *read_state_output(size_t &buff,
+                                       const char *state_output) {
+    buff += *reinterpret_cast<const size_t *>(state_output);
+    return state_output + sizeof(size_t);
+  }
+};
+
+template <> struct Helper_run<uint32_t> {
+  static void read_output(uint32_t &buff, const char *output,
+                          size_t output_len) {
+    if (output_len == 0) {
+      ;
+    } else if (output_len == 1) {
+      auto val = *reinterpret_cast<const uint8_t *>(output);
+      buff += val;
+    } else if (output_len == 2) {
+      auto val = *reinterpret_cast<const uint16_t *>(output);
+      buff += val;
+    } else {
+      assert(output_len == sizeof(uint32_t));
+      auto val = *reinterpret_cast<const uint32_t *>(output);
+      buff += val;
+    }
+  }
+
+  static const char *read_state_output(uint32_t &buff,
+                                       const char *state_output) {
+    buff += *reinterpret_cast<const uint32_t *>(state_output);
+    return state_output + sizeof(uint32_t);
+  }
+};
+
+template <> struct Helper_run<std::string> {
+  static void read_output(std::string &buff, const char *output,
+                          size_t output_len) {
+    if (output_len == 1) {
+      buff += *output;
+    } else if (output_len > 1) {
+      buff.append(output, output_len);
+    }
+  }
+
+  static const char *read_state_output(std::string &buff,
+                                       const char *state_output) {
+    size_t state_output_len = (uint8_t)*state_output++;
+    buff.append(state_output, state_output_len);
+    return state_output + state_output_len;
+  }
+};
+
+template <typename output_t, typename Begin, typename Value, typename End>
+inline void run(const char *byte_code, size_t size, const char *str,
+                Begin output_begin, Value output_value, End output_end) {
+  auto prefix = OutputTraits<output_t>::initial_value();
+
+  auto p = byte_code;
+  auto end = byte_code + size;
+  auto pstr = str;
+  auto use_jump_table = false;
+
+  while (*pstr && p < end) {
+    auto arc = (uint8_t)*pstr;
+    Ope ope;
+    ope.byte = *p++;
+
+    if (is_ope_arc(ope)) {
+      auto expected_arc = use_jump_table ? arc : (uint8_t)*p++;
+
+      size_t text_len;
+      const char *text;
+      size_t output_len;
+      const char *output;
+      size_t state_outputs_size;
+      const char *state_output;
+      Ope::JumpOffsetType jump_offset_type;
+      size_t jump_offset;
+
+      p = read_byte_code_arc<output_t>(ope, p, end, text_len, text, output_len,
+                                       output, state_outputs_size, state_output,
+                                       jump_offset_type, jump_offset);
+
+      if (arc == expected_arc) {
+        Helper_run<output_t>::read_output(prefix, output, output_len);
+
+        if (ope.arc.has_text) {
+          for (size_t i = 0; i < text_len; i++) {
+            pstr++;
+            auto arc = (uint8_t)*pstr;
+            auto expected_arc = (uint8_t)text[i];
+            if (arc != expected_arc) { return; }
+          }
+        }
+
+        pstr++;
+        if (is_ope_final(ope)) {
+          output_begin(pstr);
+
+          // NOTE: for better state_outputs compression
+          if (state_outputs_size == 0) {
+            output_value(prefix);
+          } else {
+            for (auto i = 0u; i < state_outputs_size; i++) {
+              auto final_state_output = prefix;
+
+              state_output = Helper_run<output_t>::read_state_output(
+                  final_state_output, state_output);
+
+              output_value(final_state_output);
+            }
+          }
+
+          if (output_end()) { return; }
+        }
+
+        if (jump_offset_type == Ope::JumpOffsetNone) {
+          return;
+        } else if (jump_offset_type == Ope::JumpOffsetCurrent) {
+          p += jump_offset;
+        }
+      } else {
+        if (ope.arc.last_transition) { return; }
+      }
+
+      use_jump_table = false;
+    } else { // Jmp
+      int32_t jump_offset;
+      p = read_byte_code_jmp(ope, arc, p, end, jump_offset);
+      if (jump_offset == -1) { return; }
+      p += jump_offset;
+
+      use_jump_table = true;
+    }
+  }
+
+  return;
+}
+
+template <typename output_t, typename Callback>
+inline bool exact_match_search(const char *byte_code, size_t size,
+                               const char *str, Callback callback) {
+  bool ret = false;
+
+  run<output_t>(byte_code, size, str,
+                // begin
+                [&](const char *pstr) { ret = (*pstr == '\0'); },
+                // value
+                [&](const output_t &val) {
+                  if (ret) { callback(val); }
+                },
+                // end
+                [&]() { return ret; });
+
+  return ret;
+}
+
+template <typename output_t>
+inline std::vector<output_t> exact_match_search(const char *byte_code,
+                                                size_t size, const char *str) {
+  std::vector<output_t> outputs;
+  fst::exact_match_search<output_t>(
+      byte_code, size, str,
+      [&](const output_t &val) { outputs.emplace_back(val); });
+  return outputs;
+}
+
+template <typename output_t>
+inline bool exact_match_search(const char *byte_code, size_t size,
+                               const char *str, output_t &output) {
+  return fst::exact_match_search<output_t>(
+      byte_code, size, str, [&](const output_t &val) { output = val; });
+}
+
+template <typename output_t> struct CommonPrefixSearchResult {
+  size_t length;
+  std::vector<output_t> outputs;
+};
+
+template <typename output_t, typename Callback>
+inline void common_prefix_search(const char *byte_code, size_t size,
+                                 const char *str, Callback callback) {
+  CommonPrefixSearchResult<output_t> result;
+
+  run<output_t>(byte_code, size, str,
+                // begin
+                [&](const char *pstr) {
+                  result.length = pstr - str;
+                  result.outputs.clear();
+                },
+                // value
+                [&](const output_t &val) { result.outputs.emplace_back(val); },
+                // end
+                [&]() {
+                  callback(result);
+                  return false;
+                });
+}
+
+template <typename output_t>
+inline std::vector<CommonPrefixSearchResult<output_t>>
+common_prefix_search(const char *byte_code, size_t size, const char *str) {
+  std::vector<CommonPrefixSearchResult<output_t>> ret;
+  fst::common_prefix_search<output_t>(
+      byte_code, size, str,
+      [&](const auto &result) { ret.emplace_back(result); });
+  return ret;
+}
+
+template <typename output_t, typename Value>
+inline void run_all(const char *byte_code, size_t size, int32_t offset,
+                    std::string prefix_key, output_t prefix_output,
+                    Value output_value) {
+  auto p = byte_code + offset;
+  auto end = byte_code + size;
+
+  Ope ope;
+  ope.byte = *p++;
+
+  std::list<uint8_t> arcs;
+  if (is_ope_jmp(ope)) {
+    p = skip_byte_code_jmp(ope, p, end, arcs);
+  } else {
+    p--;
+  }
+
+  while (p < end) {
+    ope.byte = *p++;
+    assert(is_ope_arc(ope));
+
+    uint8_t arc = 0;
+    if (arcs.empty()) {
+      arc = (uint8_t)*p++;
+    } else {
+      arc = arcs.front();
+      arcs.pop_front();
+    }
+
+    auto prefix_key_new = prefix_key + (char)arc;
+
+    size_t text_len;
+    const char *text;
+    size_t output_len;
+    const char *output;
+    size_t state_outputs_size;
+    const char *state_output;
+    Ope::JumpOffsetType jump_offset_type;
+    size_t jump_offset;
+
+    p = read_byte_code_arc<output_t>(ope, p, end, text_len, text, output_len,
+                                     output, state_outputs_size, state_output,
+                                     jump_offset_type, jump_offset);
+
+    if (ope.arc.has_text) { prefix_key_new.append(text, text_len); }
+
+    auto prefix_output_new = prefix_output;
+    Helper_run<output_t>::read_output(prefix_output_new, output, output_len);
+
+    if (is_ope_final(ope)) {
+      // NOTE: for better state_outputs compression
+      if (state_outputs_size == 0) {
+        output_value(prefix_key_new, prefix_output_new);
+      } else {
+        for (auto i = 0u; i < state_outputs_size; i++) {
+          auto final_state_output = prefix_output_new;
+
+          state_output = Helper_run<output_t>::read_state_output(
+              final_state_output, state_output);
+
+          output_value(prefix_key_new, final_state_output);
+        }
+        p = state_output;
+      }
+    }
+
+    if (jump_offset_type == Ope::JumpOffsetZero) {
+      run_all<output_t>(byte_code, size, (p - byte_code), prefix_key_new,
+                        prefix_output_new, output_value);
+    } else if (jump_offset_type == Ope::JumpOffsetCurrent) {
+      auto p2 = p + jump_offset;
+      run_all<output_t>(byte_code, size, (p2 - byte_code), prefix_key_new,
+                        prefix_output_new, output_value);
+    }
+
+    if (ope.arc.last_transition) { return; }
+  }
+
+  return;
+}
+
+template <typename output_t, typename Value>
+inline void decompile(const char *byte_code, size_t size, Value output_value) {
+  run_all<output_t>(byte_code, size, 0, std::string(),
+                    OutputTraits<output_t>::initial_value(), output_value);
+}
+
+//-----------------------------------------------------------------------------
+// formatter
+//-----------------------------------------------------------------------------
+
+template <typename output_t, typename Cont>
+inline std::string join(const Cont &cont, const char *delm) {
+  std::string s;
+  for (auto i = 0u; i < cont.size(); i++) {
+    if (i != 0) { s += delm; }
+    s += OutputTraits<output_t>::to_string(cont[i]);
+  }
+  return s;
+}
+
+template <typename output_t>
+inline void
+dump(const StateMachine<output_t> &sm, std::ostream &os,
+     size_t min_arcs_for_jump_table = DEFAULT_MIN_ARCS_FOR_JUMP_TABLE) {
+  Commands<output_t> commands;
+  std::vector<size_t> state_positions(sm.last_id);
+  compile_core(sm.root, commands, state_positions, 0, min_arcs_for_jump_table);
+
+  os << "Ope\tArc\t\tAddr\tNxtAdr\tID\tNextID\tSize\tLast\tFinal\tOutput\tStOut"
+        "s"
+        "\tJpOffTy\tJpOffSz\tJmpOff\n";
+  os << "------\t--------------\t------\t------\t------\t------\t------\t------"
+        "\t------"
+        "\t------\t------\t------\t------\t------\n";
+
+  size_t addr = 0;
+
+  auto rit = commands.rbegin();
+  while (rit != commands.rend()) {
+    const auto &cmd = *rit;
+    auto size = cmd.byte_code_size();
+    size_t jump_offset = 0;
+    if (cmd.is_arc) {
+      size_t next_addr = -1;
+      if (cmd.jump_offset_type == Ope::JumpOffsetZero) {
+        next_addr = addr + size;
+      } else if (cmd.jump_offset_type == Ope::JumpOffsetCurrent) {
+        next_addr = addr + size + cmd.jump_offset;
+      }
+
+      size_t jump_offset_bytes = 0;
+      if (cmd.jump_offset_type == Ope::JumpOffsetCurrent) {
+        jump_offset_bytes = vb_encode_value_length(cmd.jump_offset);
+        jump_offset = cmd.jump_offset;
+      }
+
+      os << "Arc"
+         << "\t";
+      os << (int)(uint8_t)cmd.arc << "\t";
+      os << cmd.arc;
+      if (!cmd.text.empty()) { os << cmd.text; }
+      os << "\t";
+      os << addr << "\t";
+      os << (int)next_addr << "\t";
+      os << (cmd.id == -1 ? "" : std::to_string(cmd.id)) << "\t";
+      os << (cmd.next_id == -1 ? "" : std::to_string(cmd.next_id)) << "\t";
+      os << size << "\t";
+      os << cmd.last_transition << "\t";
+      os << cmd.final << "\t";
+      os << cmd.output << "\t";
+      os << join<output_t>(cmd.state_outputs, "/") << "\t";
+      os << cmd.jump_offset_type << "\t";
+      os << jump_offset_bytes << "\t";
+      os << (int)jump_offset << std::endl;
+    } else { // Jmp
+      auto next_addr = addr + size;
+
+      os << "Jmp"
+         << "\t\t\t";
+      os << addr << "\t";
+      os << (int)next_addr << "\t";
+      os << (cmd.id == -1 ? "" : std::to_string(cmd.id)) << "\t";
+      os << "\t";
+      os << size << std::endl;
+    }
+    addr += size;
+    ++rit;
+  }
+  std::cerr << "Total size: " << addr << std::endl;
+}
+
+template <typename output_t>
+inline void dot_core(typename State<output_t>::pointer state,
+                     std::set<size_t> &check, std::ostream &os) {
+  auto id = state->id;
+
+  if (check.find(id) != check.end()) { return; }
+  check.insert(id);
+
+  if (state->final) {
+    auto state_outputs = join<output_t>(state->state_outputs, "|");
+    os << "  s" << id << " [ shape = doublecircle, xlabel = \"" << state_outputs
+       << "\" ];" << std::endl;
+  } else {
+    os << "  s" << id << " [ shape = circle ];" << std::endl;
+  }
+
+  state->transitions.for_each_with_text(
+      [&](char arc, const typename State<output_t>::Transition &t, size_t i,
+          const std::string &text) {
+        std::string label;
+        label += arc;
+        if (!text.empty()) { label += text; }
+        os << "  s" << id << "->s" << t.state->id << " [ label = \"" << label;
+        if (!OutputTraits<output_t>::empty(t.output)) { os << "/" << t.output; }
+        os << "\" ];" << std::endl;
+      });
+
+  state->transitions.for_each(
+      [&](char arc, const typename State<output_t>::Transition &t, size_t i) {
+        dot_core<output_t>(t.state, check, os);
+      });
+}
+
+template <typename output_t>
+inline void dot(const StateMachine<output_t> &sm, std::ostream &os) {
+  os << "digraph{" << std::endl;
+  os << "  rankdir = LR;" << std::endl;
+  std::set<size_t> check;
+  dot_core<output_t>(sm.root, check, os);
+  os << "}" << std::endl;
+}
+
+//-----------------------------------------------------------------------------
+// state machine interpreter - slow...
+//-----------------------------------------------------------------------------
+
+template <typename output_t>
+inline std::vector<output_t>
+exact_match_search(const StateMachine<output_t> &sm, const std::string s) {
+  auto state = sm.root;
+  auto prefix = OutputTraits<output_t>::initial_value();
+
+  auto p = s.data();
+  auto end = p + s.size();
+
+  while (p < end) {
+    auto arc = *p;
+    size_t read_bytes = 0;
+    auto next_state = state->next_state(p, end, read_bytes);
+    if (!next_state) { return std::vector<output_t>(); }
+    prefix += state->output(arc);
+    state = next_state;
+    p += read_bytes;
+  }
+
+  if (state->final && p == end) {
+    std::vector<output_t> ret;
+    if (!state->state_outputs.empty()) {
+      for (const auto &suffix : state->state_outputs) {
+        ret.push_back(prefix + suffix);
+      }
+    } else if (!OutputTraits<output_t>::empty(prefix)) {
+      ret.push_back(prefix);
+    }
+    return ret;
+  } else {
+    return std::vector<output_t>();
+  }
+}
+
+INDEXLIB_END_NS(fst);
+#endif
