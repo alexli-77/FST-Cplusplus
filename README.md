@@ -23,17 +23,3 @@ $ make and run descheduler:
 
 you can put this project into a C++ program, then use CMAKE to build this project 
 
-$ how to use it:
-
-- writer demo :
-
-
-
-- reader demo : 
-
-
-
-
-For more information about available options run:
-
-$ ./_output/bin/descheduler --help
