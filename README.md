@@ -19,7 +19,9 @@ C/C++.
 #### Build and Run
 Build FST:
 
-$ make and run descheduler:
-
 you can put this project into a C++ program, then use CMAKE to build this project 
+
+#### demo
+
+Please refer to the
 
