@@ -23,5 +23,6 @@ you can put this project into a C++ program, then use CMAKE to build this projec
 
 #### demo
 
-Please refer to the
+Please refer to the Search-prompt-service
+
 
