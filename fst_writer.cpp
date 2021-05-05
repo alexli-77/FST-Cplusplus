@@ -11,7 +11,6 @@
 #include <indexlib/fst/fst_writer.h>
 #include <indexlib/fst/fstlib.h>
 
-INDEXLIB_BEGIN_NS(fst);
 using namespace std;
 	
 FstWriter::FstWriter(const std::string &fstMmapFile):m_fstMmapFile(fstMmapFile) {}
@@ -57,4 +56,3 @@ void FstWriter::Write() {
 void FstWriter::swapKey(){
         std::vector<std::pair<std::string, output_t> >().swap(m_keys);
 }
-INDEXLIB_END_NS(fst);
