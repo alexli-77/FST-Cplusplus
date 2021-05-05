@@ -14,8 +14,6 @@
 #include <stdint.h>
 #include <fstream>
 
-INDEXLIB_BEGIN_NS(fst);
-
 typedef size_t output_t;
 
 class FstWriter
@@ -41,8 +39,6 @@ private:
 
 };	
 
-TYPEDEF_SHARED_PTR(FstWriter);
-
-INDEXLIB_END_NS(fst);
+// TYPEDEF_SHARED_PTR(FstWriter);
 
 #endif //INDEXLIB_FST_WRITER_H_
