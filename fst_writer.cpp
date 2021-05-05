@@ -13,8 +13,6 @@
 
 INDEXLIB_BEGIN_NS(fst);
 using namespace std;
-
-LOG_SETUP(fst, FstWriter);
 	
 FstWriter::FstWriter(const std::string &fstMmapFile):m_fstMmapFile(fstMmapFile) {}
 
@@ -25,7 +23,7 @@ bool FstWriter::Init() {
     m_fout = ofstream(m_fstMmapFile, ios_base::binary);
 
     if (!m_fout) { 
-		INDEXLIB_LOG(ERROR, "cannot init fst file: %s\n", m_fstMmapFile.c_str()); 
+		//LOG(ERROR, "cannot init fst file: %s\n", m_fstMmapFile.c_str()); 
 		return false; 
 	}
 
@@ -44,15 +42,10 @@ size_t FstWriter::getSlotNum() {
 }
 
 void FstWriter::Write() {
-    //sort(m_keys.begin(), m_keys.end(),
-    //        [](const auto &a, const auto &b) { return strcmp(a.first, b.first);});
-    //sort(m_keys.begin(), m_keys.end(),
-    //        [](const auto &a, const auto &b) { return a.first < b.first;});
-
     
     size_t keyCnt = m_keys.size();
     m_fout.write((const char*)(&keyCnt), sizeof(size_t));
-    INDEXLIB_LOG(INFO, "write fstfile: %s, total key: %lu.", m_fstMmapFile.c_str(), keyCnt); 
+    // LOG(INFO, "write fstfile: %s, total key: %lu.", m_fstMmapFile.c_str(), keyCnt); 
     if (0 == keyCnt) {
         return; 
     }
