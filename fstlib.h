@@ -28,10 +28,6 @@ INDEXLIB_BEGIN_NS(fst);
 // state machine
 //-----------------------------------------------------------------------------
 
-// MurmurHash64B - 64-bit MurmurHash2 for 32-bit platforms
-// URL:: https://github.com/aappleby/smhasher/blob/master/src/MurmurHash2.cpp
-// License: Public Domain
-
 inline uint64_t MurmurHash64B(const void *key, size_t len, uint64_t seed) {
   const uint32_t m = 0x5bd1e995;
   const size_t r = 24;
