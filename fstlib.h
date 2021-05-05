@@ -21,9 +21,6 @@
 #include <unordered_map>
 #include <vector>
 
-#include <indexlib/common.h>
-
-INDEXLIB_BEGIN_NS(fst);
 //-----------------------------------------------------------------------------
 // state machine
 //-----------------------------------------------------------------------------
@@ -1818,5 +1815,4 @@ exact_match_search(const StateMachine<output_t> &sm, const std::string s) {
   }
 }
 
-INDEXLIB_END_NS(fst);
 #endif
