@@ -14,9 +14,6 @@
 #include <stdint.h>
 #include <fstream>
 
-#include <indexlib/util/log.h>
-#include <indexlib/common.h>
-
 INDEXLIB_BEGIN_NS(fst);
 
 typedef size_t output_t;
@@ -42,7 +39,6 @@ private:
     std::vector<std::pair<std::string, output_t> > m_keys;
     std::string m_fstMmapFile;
 
-    LOG_DECLARE();
 };	
 
 TYPEDEF_SHARED_PTR(FstWriter);
