@@ -8,11 +8,7 @@
 #include <indexlib/fst/fst_reader.h>
 #include <indexlib/fst/fstlib.h>
 
-INDEXLIB_BEGIN_NS(fst);
-
 using namespace std;
-
-LOG_SETUP(fst, FstReader);
 	
 FstReader::FstReader(): m_keyCnt(0), m_size(0), m_fstByteArr(NULL) {}
 
@@ -28,7 +24,7 @@ FstReader::~FstReader() {
 bool FstReader::Init(const std::string &fstMmapFile) {
     ifstream fin(fstMmapFile, ios_base::binary);
     if (!fin) { 
-        INDEXLIB_LOG(ERROR, "cannot open: %s", fstMmapFile.c_str());
+//         LOG(ERROR, "cannot open: %s", fstMmapFile.c_str());
         return false;
 	}
     
@@ -38,7 +34,7 @@ bool FstReader::Init(const std::string &fstMmapFile) {
 
     m_keyCnt = 0;
     fin.read((char*)(&m_keyCnt), sizeof(size_t));
-    INDEXLIB_LOG(INFO, "read fst file: %s, file size=%lu, key count=%lu", fstMmapFile.c_str(), m_keyCnt, size);
+//     LOG(INFO, "read fst file: %s, file size=%lu, key count=%lu", fstMmapFile.c_str(), m_keyCnt, size);
 
     if (0 == m_keyCnt) return true;
 
@@ -77,5 +73,3 @@ uint32_t FstReader::GetSlotNum()
 {
 	return m_keyCnt;
 }
-
-INDEXLIB_END_NS(fst);
