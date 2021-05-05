@@ -14,7 +14,7 @@ linux
 C/C++.
 
 #### Research Topic
-1 C++ library for FST inverted index structures
+C++ library for FST inverted index structures
 
 #### Build and Run
 Build FST:
