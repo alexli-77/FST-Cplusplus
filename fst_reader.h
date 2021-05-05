@@ -12,11 +12,6 @@
 #include <cstdio>
 #include <stdint.h>
 
-#include <indexlib/common.h>
-#include <indexlib/util/log.h>
-
-INDEXLIB_BEGIN_NS(fst);
-
 typedef uint64_t output_t;
 
 class FstReader {
@@ -35,10 +30,8 @@ private:
     size_t m_size;
     char * m_fstByteArr;
 
-    LOG_DECLARE();
 };	
 
-TYPEDEF_SHARED_PTR(FstReader);
+//TYPEDEF_SHARED_PTR(FstReader);
 
-INDEXLIB_END_NS(fst);
 #endif //INDEXLIB_FST_READER_H_
